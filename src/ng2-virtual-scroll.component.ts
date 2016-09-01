@@ -1,25 +1,31 @@
 import {
-  Directive, Input, EventEmitter, ViewChild, ViewContainerRef, Component, ComponentMetadata,
-  ComponentFactoryResolver, Compiler
+  Input, EventEmitter, ViewChild, ViewContainerRef, Component, ComponentMetadata,
+  ComponentFactoryResolver, Compiler, ElementRef
 } from '@angular/core';
 import { elementVisible } from 'ng2-utils/index';
 import { Ng2VirtualScrollPageComponent } from "./ng2-virtual-scroll-page.component";
-import { Ng2VirtualScrollBottomComponent } from "./ng2-virtual-scroll-bottom.component";
 import {ViewCompiler} from "@angular/compiler/src/view_compiler/view_compiler";
 
-@Directive({
-  selector: '[ng2-virtual-scroll]'
+@Component({
+  selector: 'ng2-virtual-scroll, [ng2-virtual-scroll]',
+  template: `
+    <div id="ng2-vs-bottom" #bottom>bottom</div>
+  `
 })
-export class Ng2VirtualScrollDirective {
+export class Ng2VirtualScrollComponent {
 
-  @Input('remote-url') remoteUrl: string;
-  @Input('page-variation') pageVariation: any;
+  @Input('remote-url') remoteUrl: string;       // e.g. http://my.remote.url.com/path/to/data?page=:page`
+  @Input('page-variation') pageVariation: any;  // e.g., {page: 1}
   @Input('page-template') pageTemplate: string;
 
-  el: HTMLElement;
-  scrollSpyedElements: HTMLElement[] = [];
+  @ViewChild('bottom', { read: ViewContainerRef }) bottom;
 
-  pageComponents: any = {};
+  el: HTMLElement;                         // this directive element
+  containerElToScrollSpy: any;             // this element or window element
+  scrollSpiedElements: HTMLElement[] = []; // bottom element and page elements
+  pageComponents: any = {};                // component instances assigned to page elements
+  lastPageParams: any;                     // the last page params
+  currentlyVisiblePageEl: HTMLElement;     // currently visible element
 
   constructor(
     public  viewContainerRef: ViewContainerRef,
@@ -29,54 +35,91 @@ export class Ng2VirtualScrollDirective {
   }
 
   ngOnInit(): void {
-    this.el.addEventListener('scroll', this.scrollListener);
+    //initialize lastPageParams
+    this.lastPageParams = Object.assign({}, this.pageVariation);
+    for(var key in this.lastPageParams) {
+      this.lastPageParams[key] = 0;
+    }
 
-    this.addNg2VSBottomComponent();
+    //add scroll listener
+    let thisElStyle = window.getComputedStyle(this.el);
+    this.containerElToScrollSpy = thisElStyle.getPropertyValue('overflow') === 'auto' ? this.el : window;
+    this.containerElToScrollSpy.addEventListener('scroll', this.scrollListener);
+
+    //add bottom to scroll-spied
+    this.scrollSpiedElements.push(this.bottom.element.nativeElement);
     this.scrollListener(null);
   }
 
   scrollListener = event => {
     let elVisible: HTMLElement = null;
-    for (let i = 0; i < this.scrollSpyedElements.length; i++) {
-      let scrollSpyedElement = <HTMLElement>this.scrollSpyedElements[i];
-      let visible = elementVisible(scrollSpyedElement, this.el);
+    for (let i = 0; i < this.scrollSpiedElements.length; i++) {
+      let scrollSpiedElement = <HTMLElement>this.scrollSpiedElements[i];
+      let visible = elementVisible(scrollSpiedElement, this.containerElToScrollSpy);
       if (visible.top || visible.bottom) {
-        elVisible = scrollSpyedElement;
+        elVisible = scrollSpiedElement;
         break;
       }
     }
-    if (elVisible && elVisible.tagName == "NG2-VS-BOTTOM") {
-        this.addAPage();
+    if (elVisible && elVisible.id === "ng2-vs-bottom") {
+      this.addNg2VSPageComponent(this.pageTemplate);
     } else if (elVisible && elVisible.tagName == "NG2-VS-PAGE") {
-      let pageComponent: Ng2VirtualScrollPageComponent = this.pageComponents[elVisible.id];
-      pageComponent.loadData(this.remoteUrl, this.pageVariation);
+      if (elVisible !== this.currentlyVisiblePageEl) {
+        if (this.currentlyVisiblePageEl) {
+          let hiddenElId = this.currentlyVisiblePageEl.id;
+          let hiddenElComponent = this.pageComponents[hiddenElId];
+          hiddenElComponent.emptyDOM();
+        }
+
+        this.currentlyVisiblePageEl = elVisible;
+        let visibleElComponent = this.pageComponents[this.currentlyVisiblePageEl.id];
+        visibleElComponent.reloadData();
+      }
     }
   };
-
-  addAPage(): void {
-    console.log('#addAPage');
-    this.addNg2VSPageComponent(this.pageTemplate);
-  }
-
-  addNg2VSBottomComponent(): void {
-    let factory = this.compiler.compileComponentSync(Ng2VirtualScrollBottomComponent);
-    let componentRef = this.viewContainerRef.createComponent(factory);
-    let component = componentRef.instance;
-  }
 
   addNg2VSPageComponent(template: string): void {
     @Component({selector: 'ng2-vs-page', template: template })
     class Ng2VSPageComponent extends Ng2VirtualScrollPageComponent {}
 
+    // add a new page before the bottom
     let factory = this.compiler.compileComponentSync(Ng2VSPageComponent);
-
-    let componentRef = this.viewContainerRef.createComponent(factory);
+    let componentRef = this.bottom.createComponent(factory);
     let component = componentRef.instance;
+    //move bottom element to the bottom of the container, so that we can always append to the bottom
+    let bottomEl = this.bottom.element.nativeElement;
+    bottomEl.parentNode.appendChild(bottomEl);
 
-    component.remoteUrl = this.remoteUrl;
-    //TODO: replace remote url with pageVariation
+    // generate id
+    let pageEl = componentRef.location.nativeElement;
+    let firstKey = Object.keys(this.lastPageParams)[0];
+    let pageElId = firstKey + this.lastPageParams[firstKey];
 
-    this.pageComponents['page1'] = componentRef;
+    // fill the page component with data
+    let remoteUrl = this.getNextPageRemoteUrl();
+    component.id = pageElId;
+    component.loadData(remoteUrl).subscribe(resp => {
+      component.data = resp;
+    });
+
+    //add this page to be scroll-spied
+    pageEl.setAttribute('id', pageElId);
+    this.pageComponents[pageElId] = component;
+    this.scrollSpiedElements.push(pageEl);
+  }
+
+  // remoteUrl:         https://remote.url.com/path/to/data?page=:page&offset=:offset
+  // pageVariation:     {page:1, offset: 10}
+  // lastPageParams:    {page:6, offset: 60}
+  private getNextPageRemoteUrl() {
+    let nextPageParams = this.lastPageParams;
+    let remoteUrl = this.remoteUrl;
+    for(var key in nextPageParams) {
+      nextPageParams[key] +=  this.pageVariation[key];
+      remoteUrl = remoteUrl.replace(':'+key, nextPageParams[key]);
+    }
+    this.lastPageParams = nextPageParams;
+    return remoteUrl;
   }
 
 }
