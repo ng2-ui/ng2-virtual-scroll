@@ -1,6 +1,9 @@
 # ng2-virtual-scroll
 virtual scroll, each page is only rendered when it's in viewport
 
+## IMPORTANT: NOT-MAINTAINED
+Accepting volunteers and ready to transfer ownership.
+
 1. install ng2-virtual-scroll
 
     npm install ng2-virtual-scroll --save
